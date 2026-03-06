@@ -41,13 +41,15 @@ def process_game(events_path, shifts_path, tracking_paths):
     tracking_frames = []
     for p_path in tracking_paths:
         if os.path.exists(p_path):
-            tracking_frames.append(pd.read_csv(p_path))
+            tracking_frames.append(pd.read_csv(p_path, low_memory=False))
     
     if not tracking_frames:
         print(f"Warning: No tracking data found for {events_path}")
         return
         
     tracking = pd.concat(tracking_frames, ignore_index=True)
+    if 'Goal Score' in tracking.columns:
+        tracking.drop(columns=['Goal Score'], inplace=True)
     
     # Standardize Player IDs across all datasets
     events['Player_Id'] = events['Player_Id'].apply(clean_player_id)
@@ -81,16 +83,35 @@ def process_game(events_path, shifts_path, tracking_paths):
     # Game Strength Column
     events['Strength'] = events.apply(lambda row: f"{int(row['Home_Team_Skaters'])}v{int(row['Away_Team_Skaters'])}", axis=1)
 
-    # Shift Validation (Bench Check)
-    def validate_shift(row, shift_df):
-        p_id, seconds, period = row['Player_Id'], row['Seconds'], row['Period']
-        if pd.isna(p_id): return 0
-        match = shift_df[(shift_df['Player_Id'] == p_id) & (shift_df['period'] == period)]
-        # Clock counts down: Start_Seconds > End_Seconds
-        on_ice = match[(match['Start_Seconds'] >= seconds) & (match['End_Seconds'] <= seconds)]
-        return 0 if not on_ice.empty else 1
+    # Shift Validation Helper (Vectorized for performance)
+    def calculate_shift_flags(data_df, shift_df, p_id_col='Player_Id', time_col='Seconds'):
+        # Only check rows with a Player_Id (ignore Puck)
+        valid_players = data_df[data_df[p_id_col].notna()].copy()
+        if valid_players.empty:
+            return pd.Series(0, index=data_df.index)
+        
+        # Merge data with all possible shifts for those players
+        # Note: shifts dataframe always uses 'Player_Id' and 'period'
+        merged = valid_players.reset_index().merge(
+            shift_df[['Player_Id', 'period', 'Start_Seconds', 'End_Seconds']],
+            left_on=[p_id_col, 'Period'],
+            right_on=['Player_Id', 'period'],
+            how='left'
+        )
+        
+        # Check if clock time is within shift (Start >= Seconds >= End)
+        merged['is_on_ice'] = (merged[time_col] <= merged['Start_Seconds']) & \
+                               (merged[time_col] >= merged['End_Seconds'])
+        
+        # Group by the original index to see if the player was on ANY shift at that time
+        on_ice_results = merged.groupby('index')['is_on_ice'].any()
+        
+        # Flag is 0 if on ice, 1 if not on ice (bench error)
+        flags = pd.Series(0, index=data_df.index)
+        flags.loc[valid_players.index] = (~on_ice_results).astype(int)
+        return flags
 
-    events['shift_flag'] = events.apply(lambda row: validate_shift(row, shifts), axis=1)
+    events['shift_flag'] = calculate_shift_flags(events, shifts)
 
     # Transform Incomplete Plays into Turnovers
     events['Next_Team'] = events['Team'].shift(-1)
@@ -133,8 +154,10 @@ def process_game(events_path, shifts_path, tracking_paths):
     valid_images = player_counts[player_counts >= 4].index
     tracking = tracking[tracking['Image Id'].isin(valid_images)]
     
-    # Initialize shift flag
-    tracking['shift_flag'] = 1
+    # Calculate shift flags for tracking (players only)
+    tracking['shift_flag'] = calculate_shift_flags(
+        tracking, shifts, p_id_col='Player_Id_Cleaned', time_col='Seconds'
+    )
     
     # Save cleaned data
     game_base = os.path.basename(events_path).replace('.Events.csv', '')
