@@ -116,7 +116,7 @@ def process_game(events_path, shifts_path, tracking_paths):
             a = int(float(row['Away_Team_Skaters']))
             return f"{h}v{a}"
         except (ValueError, TypeError):
-            return "Unknown"
+            return "5v5"
 
     events['Strength'] = events.apply(get_strength, axis=1)
 
@@ -149,9 +149,9 @@ def process_game(events_path, shifts_path, tracking_paths):
 
     events['shift_flag'] = calculate_shift_flags(events, shifts)
 
-    # Transform Incomplete Plays into Turnovers
-    events['Next_Team'] = events['Team'].shift(-1)
-    events['Next_Event'] = events['Event'].shift(-1)
+    # Transform Incomplete Plays into Turnovers (Period-Aware)
+    events['Next_Team'] = events.groupby('Period')['Team'].shift(-1)
+    events['Next_Event'] = events.groupby('Period')['Event'].shift(-1)
     
     turnover_mask = (
         (events['Event'] == 'Incomplete Play') & 
