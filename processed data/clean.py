@@ -51,8 +51,12 @@ def process_game(events_path, shifts_path, tracking_paths):
     if 'Goal Score' in tracking.columns:
         tracking.drop(columns=['Goal Score'], inplace=True)
     
+    # Deduplicate Tracking Data
+    tracking.drop_duplicates(subset=['Image Id', 'Player or Puck', 'Player Jersey Number'], inplace=True)
+    
     # Standardize Player IDs across all datasets
     events['Player_Id'] = events['Player_Id'].apply(clean_player_id)
+    events['Player_Id_2'] = events['Player_Id_2'].apply(clean_player_id)
     shifts['Player_Id'] = shifts['Player_Id'].apply(clean_player_id)
     
     if 'Player Jersey Number' in tracking.columns:
@@ -71,6 +75,7 @@ def process_game(events_path, shifts_path, tracking_paths):
     tracking['Seconds'] = pd.to_numeric(tracking['Game Clock'].apply(clock_to_seconds), errors='coerce')
     shifts['Start_Seconds'] = pd.to_numeric(shifts['start_clock'].apply(clock_to_seconds), errors='coerce')
     shifts['End_Seconds'] = pd.to_numeric(shifts['end_clock'].apply(clock_to_seconds), errors='coerce')
+    shifts['shift_length_seconds'] = shifts['shift_length'].apply(clock_to_seconds)
     
     # Force Period to integer
     tracking['Period'] = pd.to_numeric(tracking['Period'], errors='coerce').fillna(0).astype(int)
@@ -81,17 +86,28 @@ def process_game(events_path, shifts_path, tracking_paths):
     tracking['Rink Location Y (Feet)'] = pd.to_numeric(tracking['Rink Location Y (Feet)'], errors='coerce')
     events['X_Coordinate'] = pd.to_numeric(events['X_Coordinate'], errors='coerce')
     events['Y_Coordinate'] = pd.to_numeric(events['Y_Coordinate'], errors='coerce')
+    events['X_Coordinate_2'] = pd.to_numeric(events['X_Coordinate_2'], errors='coerce')
+    events['Y_Coordinate_2'] = pd.to_numeric(events['Y_Coordinate_2'], errors='coerce')
 
-    # Normalize orientation (Flip X/Y in even periods)
-    mask_flip = tracking['Period'].isin([2, 4])
-    tracking.loc[mask_flip, 'Rink Location X (Feet)'] *= -1
-    tracking.loc[mask_flip, 'Rink Location Y (Feet)'] *= -1
+    # Normalize orientation (Flip X/Y in even periods for BOTH tracking and events)
+    # This ensures event location matches normalized tracking location
+    mask_flip_tracking = tracking['Period'].isin([2, 4])
+    tracking.loc[mask_flip_tracking, 'Rink Location X (Feet)'] *= -1
+    tracking.loc[mask_flip_tracking, 'Rink Location Y (Feet)'] *= -1
+    
+    mask_flip_events = events['Period'].isin([2, 4])
+    events.loc[mask_flip_events, 'X_Coordinate'] *= -1
+    events.loc[mask_flip_events, 'Y_Coordinate'] *= -1
+    events.loc[mask_flip_events, 'X_Coordinate_2'] *= -1
+    events.loc[mask_flip_events, 'Y_Coordinate_2'] *= -1
     
     # Coordinate Clipping to Rink Bounds
     tracking['Rink Location X (Feet)'] = tracking['Rink Location X (Feet)'].clip(-100, 100)
     tracking['Rink Location Y (Feet)'] = tracking['Rink Location Y (Feet)'].clip(-42.5, 42.5)
     events['X_Coordinate'] = events['X_Coordinate'].clip(-100, 100)
     events['Y_Coordinate'] = events['Y_Coordinate'].clip(-42.5, 42.5)
+    events['X_Coordinate_2'] = events['X_Coordinate_2'].clip(-100, 100)
+    events['Y_Coordinate_2'] = events['Y_Coordinate_2'].clip(-42.5, 42.5)
 
     # Game Strength Column - Handle potential NaNs in skater counts
     def get_strength(row):
