@@ -6,7 +6,7 @@ import re
 
 GOALIE_ID = 100
 RINK_X_MAX = 100.0
-MAX_PUCK_SPEED_KMH = 41.0
+MAX_PUCK_SPEED_KMH = 160.0
 MAX_PUCK_SPEED_MS = MAX_PUCK_SPEED_KMH / 3.6
 FEET_TO_METERS = 0.3048
 
@@ -51,8 +51,8 @@ def process_game(events_path, shifts_path, tracking_paths):
     if 'Goal Score' in tracking.columns:
         tracking.drop(columns=['Goal Score'], inplace=True)
     
-    # Deduplicate Tracking Data
-    tracking.drop_duplicates(subset=['Image Id', 'Player or Puck', 'Player Jersey Number'], inplace=True)
+    # Deduplicate Tracking Data (Include Period for safety)
+    tracking.drop_duplicates(subset=['Period', 'Image Id', 'Player or Puck', 'Player Jersey Number'], inplace=True)
     
     # Standardize Player IDs across all datasets
     events['Player_Id'] = events['Player_Id'].apply(clean_player_id)
@@ -120,19 +120,18 @@ def process_game(events_path, shifts_path, tracking_paths):
 
     events['Strength'] = events.apply(get_strength, axis=1)
 
-    # Shift Validation Helper (Vectorized for performance)
-    def calculate_shift_flags(data_df, shift_df, p_id_col='Player_Id', time_col='Seconds'):
+    # Shift Validation Helper (Updated to join on Team)
+    def calculate_shift_flags(data_df, shift_df, p_id_col='Player_Id', team_col='Team', time_col='Seconds'):
         # Only check rows with a Player_Id (ignore Puck)
         valid_players = data_df[data_df[p_id_col].notna()].copy()
         if valid_players.empty:
             return pd.Series(0, index=data_df.index)
         
-        # Merge data with all possible shifts for those players
-        # Note: shifts dataframe always uses 'Player_Id' and 'period'
+        # Merge data with all possible shifts for those players on that team
         merged = valid_players.reset_index().merge(
-            shift_df[['Player_Id', 'period', 'Start_Seconds', 'End_Seconds']],
-            left_on=[p_id_col, 'Period'],
-            right_on=['Player_Id', 'period'],
+            shift_df[['Team', 'Player_Id', 'period', 'Start_Seconds', 'End_Seconds']],
+            left_on=[team_col, p_id_col, 'Period'],
+            right_on=['Team', 'Player_Id', 'period'],
             how='left'
         )
         
@@ -140,7 +139,7 @@ def process_game(events_path, shifts_path, tracking_paths):
         merged['is_on_ice'] = (merged[time_col] <= merged['Start_Seconds']) & \
                                (merged[time_col] >= merged['End_Seconds'])
         
-        # Group by the original index to see if the player was on ANY shift at that time
+        # Group by the original index to see if the player was on ANY matching shift at that time
         on_ice_results = merged.groupby('index')['is_on_ice'].any()
         
         # Flag is 0 if on ice, 1 if not on ice (bench error)
@@ -171,13 +170,13 @@ def process_game(events_path, shifts_path, tracking_paths):
         puck_data['Rink Location X (Feet)'] = puck_data.groupby('Period')['Rink Location X (Feet)'].transform(lambda x: x.interpolate())
         puck_data['Rink Location Y (Feet)'] = puck_data.groupby('Period')['Rink Location Y (Feet)'].transform(lambda x: x.interpolate())
         
-        # Speed check: if puck speed > 41kmh, invalidate and re-interpolate
+        # Speed check: if puck speed > 160kmh, invalidate and re-interpolate
         puck_data['dt'] = puck_data['Seconds'].diff().abs()
         puck_data['dx'] = puck_data['Rink Location X (Feet)'].diff() * FEET_TO_METERS
         puck_data['dy'] = puck_data['Rink Location Y (Feet)'].diff() * FEET_TO_METERS
         puck_data['dist'] = np.sqrt(puck_data['dx']**2 + puck_data['dy']**2)
         
-        # Avoid division by zero if tracking frequency is too high or timestamps are duplicated
+        # Avoid division by zero
         puck_data['speed'] = np.where(puck_data['dt'] > 0, puck_data['dist'] / puck_data['dt'], 0)
 
         # Invalidate high speeds and re-interpolate
@@ -195,9 +194,9 @@ def process_game(events_path, shifts_path, tracking_paths):
     valid_images = player_counts[player_counts >= 4].index
     tracking = tracking[tracking['Image Id'].isin(valid_images)]
     
-    # Calculate shift flags for tracking (players only)
+    # Calculate shift flags for tracking (players only, using Team_Name)
     tracking['shift_flag'] = calculate_shift_flags(
-        tracking, shifts, p_id_col='Player_Id_Cleaned', time_col='Seconds'
+        tracking, shifts, p_id_col='Player_Id_Cleaned', team_col='Team_Name', time_col='Seconds'
     )
     
     # Save cleaned data
@@ -238,4 +237,4 @@ def main():
         process_game(e_file, s_file, t_files)
 
 if __name__ == "__main__":
-    main()
+    main()
