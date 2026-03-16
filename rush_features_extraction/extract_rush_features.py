@@ -16,6 +16,49 @@ def calculate_speed(tracking_df, time_window=1.0):
     df['speed'] = np.where(df['dt'] > 0, df['dist'] / df['dt'], 0)
     return df
 
+def calculate_proxy_xg(event_row):
+    """
+    Proxy xG model based on shot type and location.
+    Calculates the expected goal value for a single shot event.
+    Net center assumed at (89, 0) feet.
+    """
+    if event_row['Event'] not in ['Shot', 'Goal']:
+        return 0.0
+        
+    x = event_row['X_Coordinate']
+    y = event_row['Y_Coordinate']
+    
+    # Distance to center of net (89, 0)
+    # Using abs(x) to handle both sides if needed, but usually 89 is target end
+    dist = np.sqrt((89 - abs(x))**2 + (y)**2)
+    
+    # Angle to net center (degrees)
+    angle = np.degrees(np.abs(np.arctan2(y, 89 - abs(x))))
+    
+    # Base probability by shot type (based on NHL averages)
+    shot_type = str(event_row['Detail_1'])
+    base_probs = {
+        'Wristshot': 0.08,
+        'Snapshot': 0.09,
+        'Slapshot': 0.06,
+        'Deflection': 0.15,
+        'Backhand': 0.07,
+        'Tip-In': 0.20,
+        'Wrap Around': 0.10
+    }
+    prob = base_probs.get(shot_type, 0.05)
+    
+    # Heuristic decay for distance and angle
+    # Distance multiplier: exponential decay starting after 10ft
+    dist_mult = np.exp(-0.035 * max(0, dist - 10))
+    # Angle multiplier: cos of angle (penalty for wide angles)
+    angle_mult = np.cos(np.radians(angle))
+    
+    # Final proxy xG value
+    final_xg = prob * dist_mult * max(0.1, angle_mult)
+    
+    return final_xg
+
 def extract_frame_features(t_frame, attacking_team):
     puck = t_frame[t_frame['Player or Puck'] == 'Puck']
     players = t_frame[t_frame['Player or Puck'] == 'Player']
@@ -48,158 +91,80 @@ def extract_frame_features(t_frame, attacking_team):
     pc_x = pcarrier['Rink Location X (Feet)']
     pc_y = pcarrier['Rink Location Y (Feet)']
     
-    # F1: SupportDist
-    other_attackers = attackers[attackers.index != pcarrier.name]
-    support_dist = np.mean(np.sqrt((other_attackers['Rink Location X (Feet)'] - pc_x)**2 + 
-                                   (other_attackers['Rink Location Y (Feet)'] - pc_y)**2))
+    # --- 1. Support Structure ---
+    other_attackers = attackers[attackers.index != pcarrier.name].copy()
+    other_attackers['Dist_to_PC'] = np.sqrt((other_attackers['Rink Location X (Feet)'] - pc_x)**2 + 
+                                            (other_attackers['Rink Location Y (Feet)'] - pc_y)**2)
+    sorted_supporters = other_attackers.sort_values('Dist_to_PC')
     
-    # F2: LaneSpread
-    lane_spread = attackers['Rink Location Y (Feet)'].std()
+    # Nearest teammate distance
+    nearest_support_dist = sorted_supporters.iloc[0]['Dist_to_PC'] if not sorted_supporters.empty else np.nan
+    # Second closest support distance
+    second_support_dist = sorted_supporters.iloc[1]['Dist_to_PC'] if len(sorted_supporters) >= 2 else np.nan
+    # Number of teammates within support radius (25 feet)
+    teammates_in_radius = (other_attackers['Dist_to_PC'] < 25.0).sum()
     
-    # F3: DepthRange
-    depth_range = attackers['Rink Location X (Feet)'].max() - attackers['Rink Location X (Feet)'].min()
-    
-    # F4: MeanSpeed (Team Mean Speed)
-    mean_speed = attackers['speed'].mean()
-    
-    # --- NEW: Carrier Dynamics ---
-    carrier_speed = pcarrier['speed']
-    # Acceleration proxy: change in speed over the 0.1s frame interval 
-    # (Assuming tracking is 10Hz, dt is often ~0.1s)
-    # We will estimate carrier_acceleration in process_game instead to use a true window,
-    # or just use the difference from previous frame if tracking has it. For frame-level,
-    # we'll extract speed and handle acceleration at the episode level.
-    carrier_speed_relative_to_team = carrier_speed - mean_speed
-
-    # distance to all other attackers
-    other_attackers = other_attackers.copy()
-    other_attackers['Dist_to_Carrier'] = np.sqrt((other_attackers['Rink Location X (Feet)'] - pc_x)**2 + 
-                                                 (other_attackers['Rink Location Y (Feet)'] - pc_y)**2)
-    # Sort supporters by distance
-    sorted_supporters = other_attackers.sort_values('Dist_to_Carrier')
-    
-    # second_support_distance
-    if len(sorted_supporters) >= 2:
-        second_support_distance = sorted_supporters.iloc[1]['Dist_to_Carrier']
-        
-        # support_triangle_area
-        # Coordinates of triangle vertices
-        p1 = np.array([pc_x, pc_y])
-        p2 = np.array([sorted_supporters.iloc[0]['Rink Location X (Feet)'], sorted_supporters.iloc[0]['Rink Location Y (Feet)']])
-        p3 = np.array([sorted_supporters.iloc[1]['Rink Location X (Feet)'], sorted_supporters.iloc[1]['Rink Location Y (Feet)']])
-        # Area = 0.5 * |xA(yB - yC) + xB(yC - yA) + xC(yA -yB)|
-        support_triangle_area = 0.5 * abs(p1[0]*(p2[1]-p3[1]) + p2[0]*(p3[1]-p1[1]) + p3[0]*(p1[1]-p2[1]))
-        
-        # support_angle (angle between p1->p2 and p1->p3)
-        v1 = p2 - p1
-        v2 = p3 - p1
-        cos_theta = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2) + 1e-9)
-        support_angle = np.degrees(np.arccos(np.clip(cos_theta, -1.0, 1.0)))
-    else:
-        second_support_distance = np.nan
-        support_triangle_area = np.nan
-        support_angle = np.nan
-    
-    # --- NEW: Lane Structure ---
-    # Left (-42.5 to -14), Middle (-14 to 14), Right (14 to 42.5)
+    # --- 2. Lane Structure ---
     attackers_y = attackers['Rink Location Y (Feet)']
-    left_lane = (attackers_y < -14).sum()
-    middle_lane = ((attackers_y >= -14) & (attackers_y <= 14)).sum()
-    right_lane = (attackers_y > 14).sum()
-    # Lane balance: variance of occupancy across the 3 lanes (lower variance = more balanced)
-    lane_balance = np.var([left_lane, middle_lane, right_lane])
+    lane_spread = attackers_y.std() # standard deviation of Y positions
+    max_lane_width = attackers_y.max() - attackers_y.min() # total lateral width
     
-    max_lane_width = attackers_y.max() - attackers_y.min()
+    # Distribution across L/M/R lanes
+    left_count = (attackers_y < -14).sum()
+    middle_count = ((attackers_y >= -14) & (attackers_y <= 14)).sum()
+    right_count = (attackers_y > 14).sum()
+    lane_balance = np.var([left_count, middle_count, right_count])
     
-    # Weakside support distance (furthest attacker from carrier)
-    if not other_attackers.empty:
-        weakside_support_distance = other_attackers['Dist_to_Carrier'].max()
+    # --- 3. Depth Layering ---
+    attackers_x = attackers['Rink Location X (Feet)']
+    depth_range = attackers_x.max() - attackers_x.min() # range of X positions
+    depth_variance = attackers_x.var() # variance in forward depth
+    is_flat_line = 1 if depth_range < 5.0 else 0 # indicator of "flat-line" formation
+    
+    # --- 4. Team Speed ---
+    mean_team_speed = attackers['speed'].mean() # mean forward speed
+    speed_variance = attackers['speed'].var() # variance in player speeds
+    carrier_speed = pcarrier['speed'] # baseline speed
+    
+    # --- 5. Defensive Pressure ---
+    defenders = defenders.copy()
+    defenders['Dist_to_PC'] = np.sqrt((defenders['Rink Location X (Feet)'] - pc_x)**2 + 
+                                      (defenders['Rink Location Y (Feet)'] - pc_y)**2)
+    closest_defenders = defenders.sort_values('Dist_to_PC')
+    
+    nearest_defender_dist = closest_defenders.iloc[0]['Dist_to_PC'] if not closest_defenders.empty else np.nan
+    defender_closing_speed = closest_defenders.iloc[0]['speed'] if not closest_defenders.empty else np.nan
+    
+    # Number of defenders between puck carrier and goal (count on attack side of X)
+    # Heuristic for attack direction: towards boards (89 or -89)
+    # We'll use the already calculated attack_dir logic
+    if hasattr(pcarrier, 'dx') and not pd.isna(pcarrier['dx']):
+        attack_dir = np.sign(pcarrier['dx'])
     else:
-        weakside_support_distance = np.nan
+        attack_dir = 1
+    if attack_dir == 0: attack_dir = 1
     
-    # F5: Pressure & --- NEW: Defender Pressure ---
-    defenders['Dist_to_Carrier'] = np.sqrt((defenders['Rink Location X (Feet)'] - pc_x)**2 + 
-                                           (defenders['Rink Location Y (Feet)'] - pc_y)**2)
-    closest_defenders = defenders.sort_values('Dist_to_Carrier')
-    
-    if not closest_defenders.empty:
-        pressure = closest_defenders.head(2)['Dist_to_Carrier'].mean()
-        nearest_defender_distance = closest_defenders.iloc[0]['Dist_to_Carrier']
-        
-        # Defender closing speed (proxy: difference between defender speed towards carrier and carrier speed away)
-        # For a single frame, taking the absolute speed of nearest defender as a simple metric if directional isn't trivial.
-        # We will calculate a strict closing speed over the episode window later, or use relative speeds here.
-        nearest_def = closest_defenders.iloc[0]
-        # Approximation: speed of nearest defender + (relative motion towards carrier)
-        # Using a simpler proxy for the frame level: nearest defender speed
-        nearest_defender_speed = nearest_def['speed'] 
-        
-        # Number of defenders between puck and goal. 
-        # Assume attacking net is at X=89 feet (typical NHL rink center of goal line)
-        attacking_net_x = 89 * np.sign(pc_x) if pc_x != 0 else 89 # simplistic direction heuristic based on carrier half, though real is known from Period/Team
-        # A more robust direction check using the team's mean X over time could be here, but we'll use sign(pc_x) as a proxy
-        # for an established rush if they are already over center ice. If they start in D zone, this might be backwards.
-        # Let's assume play flows towards +X or -X based on the event's "X Coordinate" vs outcome, or just use X distance.
-        # Actually, let's just count defenders whose X is between the carrier and the end boards in the direction they are moving.
-        # We know carrier's X-velocity (dx). If dx is positive, they are attacking +X. If negative, -X.
-        if hasattr(pcarrier, 'dx') and not pd.isna(pcarrier['dx']):
-             attack_dir = np.sign(pcarrier['dx'])
-        else:
-             attack_dir = 1 # default
-             
-        if attack_dir == 0: attack_dir = 1
-        
-        # Defenders "between" puck and goal (i.e. further down the ice in attack direction)
-        if attack_dir > 0:
-            defenders_between = defenders[defenders['Rink Location X (Feet)'] > pc_x].shape[0]
-        else:
-            defenders_between = defenders[defenders['Rink Location X (Feet)'] < pc_x].shape[0]
-            
+    if attack_dir > 0:
+        defenders_between = defenders[defenders['Rink Location X (Feet)'] > pc_x].shape[0]
     else:
-        pressure = np.nan
-        nearest_defender_distance = np.nan
-        nearest_defender_speed = np.nan
-        defenders_between = 0
-        
-    # --- NEW: Transition Geometry ---
-    # distance_to_blue_line. Attacking blue line is at X = 25 (if attacking +) or -25 (if attacking -)
-    attacking_blue_line_x = 25 * attack_dir
-    distance_to_blue_line = abs(attacking_blue_line_x - pc_x)
-    
-    # angle_to_net
-    # Net is at X=89 (or -89), Y=0. Vector from carrier to net:
-    dx_net = attacking_net_x - pc_x
-    dy_net = 0 - pc_y
-    angle_to_net = np.degrees(np.abs(np.arctan2(dy_net, dx_net)))
-    
-    # rush_direction_speed
-    # Component of carrier speed in the attack direction (X-axis)
-    if hasattr(pcarrier, 'dx') and hasattr(pcarrier, 'dt') and pcarrier['dt'] > 0:
-        rush_direction_speed = (pcarrier['dx'] / pcarrier['dt']) * attack_dir
-    else:
-        # fallback to simple speed if dx/dt unavailable
-        rush_direction_speed = carrier_speed * 1.0  # assume largely forward
+        defenders_between = defenders[defenders['Rink Location X (Feet)'] < pc_x].shape[0]
     
     return {
-        'SupportDist': support_dist,
-        'LaneSpread': lane_spread,
-        'DepthRange': depth_range,
-        'MeanSpeed': mean_speed,
-        'Pressure': pressure,
-        'carrier_speed': carrier_speed,
-        'carrier_speed_relative_to_team': carrier_speed_relative_to_team,
-        'second_support_distance': second_support_distance,
-        'support_triangle_area': support_triangle_area,
-        'support_angle': support_angle,
-        'lane_balance': lane_balance,
+        'nearest_support_dist': nearest_support_dist,
+        'second_support_dist': second_support_dist,
+        'teammates_in_radius': teammates_in_radius,
+        'lane_spread': lane_spread,
         'max_lane_width': max_lane_width,
-        'weakside_support_distance': weakside_support_distance,
-        'nearest_defender_distance': nearest_defender_distance,
-        'nearest_defender_speed': nearest_defender_speed,
-        'number_of_defenders_between_puck_and_goal': defenders_between,
-        'distance_to_blue_line': distance_to_blue_line,
-        'angle_to_net': angle_to_net,
-        'rush_direction_speed': rush_direction_speed
+        'lane_balance': lane_balance,
+        'depth_range': depth_range,
+        'depth_variance': depth_variance,
+        'is_flat_line': is_flat_line,
+        'mean_team_speed': mean_team_speed,
+        'speed_variance': speed_variance,
+        'carrier_speed': carrier_speed,
+        'nearest_defender_dist': nearest_defender_dist,
+        'defender_closing_speed': defender_closing_speed,
+        'defenders_between': defenders_between
     }
 
 def process_game(events_path, tracking_path):
@@ -257,19 +222,22 @@ def process_game(events_path, tracking_path):
         mean_feats = feat_df.mean().to_dict()
         mean_feats['carrier_acceleration'] = carrier_accel
         
-        # 2. Outcome Window (2 to 10 seconds after recovery)
+        # 2. Outcome Window (2 to 15 seconds after recovery)
         outcome_window = events.loc[
             (events['Period'] == period) & 
             (events['Seconds'] > start_time + 2.0) & 
-            (events['Seconds'] <= start_time + 10.0) &
+            (events['Seconds'] <= start_time + 15.0) &
             (events['Team'] == attacking_team)
         ]
         
-        # Target: Shot within 2-10 seconds
+        # Target: Shot within 2-15 seconds
         shot_outcome = outcome_window[outcome_window['Event'].isin(['Shot', 'Goal'])]
         shot_10s = 1 if len(shot_outcome) > 0 else 0
         
-        # Target: Controlled Zone Entry within 2-10 seconds
+        # NEW Target: Continuous xG sum within 15 seconds
+        xg_sum_15s = outcome_window.apply(calculate_proxy_xg, axis=1).sum()
+        
+        # Target: Controlled Zone Entry within 2-15 seconds
         entry_outcome = outcome_window[
             (outcome_window['Event'] == 'Zone Entry') & 
             (outcome_window['Detail_1'].isin(['Carried', 'Played']))
@@ -283,7 +251,8 @@ def process_game(events_path, tracking_path):
             'Attacking_Team': attacking_team,
             **mean_feats,
             'ControlledEntry': controlled_entry,
-            'Shot_10s': shot_10s
+            'Shot_10s': shot_10s,
+            'xG_15s': xg_sum_15s
         })
         
     return pd.DataFrame(rush_records)
@@ -308,12 +277,12 @@ def main():
         final_df = pd.concat(all_rushes, ignore_index=True)
         # Drop rows with NaNs in core features to ensure cleanly defined rushes
         features = [
-            'SupportDist', 'LaneSpread', 'DepthRange', 'MeanSpeed', 'Pressure',
-            'carrier_speed', 'carrier_speed_relative_to_team', 'second_support_distance',
-            'support_triangle_area', 'support_angle', 'lane_balance', 'max_lane_width',
-            'weakside_support_distance', 'nearest_defender_distance', 'nearest_defender_speed',
-            'number_of_defenders_between_puck_and_goal', 'distance_to_blue_line',
-            'angle_to_net', 'rush_direction_speed', 'carrier_acceleration'
+            'nearest_support_dist', 'second_support_dist', 'teammates_in_radius',
+            'lane_spread', 'max_lane_width', 'lane_balance',
+            'depth_range', 'depth_variance', 'is_flat_line',
+            'mean_team_speed', 'speed_variance', 'carrier_speed', 'carrier_acceleration',
+            'nearest_defender_dist', 'defender_closing_speed', 'defenders_between',
+            'xG_15s'
         ]
         final_df.dropna(subset=features, inplace=True)
         
