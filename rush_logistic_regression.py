@@ -10,26 +10,11 @@ def load_data(filepath):
     
     # Independent Variables (Features / X)
     features = [
-        'SupportDist', 
-        'LaneSpread', 
-        'DepthRange', 
-        'MeanSpeed', 
-        'Pressure',
-        'carrier_speed',
-        'carrier_acceleration',
-        'carrier_speed_relative_to_team',
-        'second_support_distance',
-        'support_triangle_area',
-        'support_angle',
-        'lane_balance',
-        'max_lane_width',
-        'weakside_support_distance',
-        'nearest_defender_distance',
-        'nearest_defender_speed',
-        'number_of_defenders_between_puck_and_goal',
-        'distance_to_blue_line',
-        'angle_to_net',
-        'rush_direction_speed'
+        'nearest_support_dist', 'second_support_dist', 'teammates_in_radius',
+        'lane_spread', 'max_lane_width', 'lane_balance',
+        'depth_range', 'depth_variance', 'is_flat_line',
+        'mean_team_speed', 'speed_variance', 'carrier_speed', 'carrier_acceleration',
+        'nearest_defender_dist', 'defender_closing_speed', 'defenders_between'
     ]
     X = df[features].copy()
     
@@ -76,28 +61,41 @@ def generate_synthetic_data(n_samples=2000):
     
     # Generate random features
     data = pd.DataFrame({
-        'SupportDist': np.random.normal(15, 5, n_samples).clip(0),
-        'LaneSpread': np.random.normal(20, 8, n_samples).clip(0),
-        'DepthRange': np.random.normal(10, 4, n_samples).clip(0),
-        'MeanSpeed': np.random.normal(25, 6, n_samples).clip(0),
-        'Pressure': np.random.normal(5, 2, n_samples).clip(0)
+        'nearest_support_dist': np.random.normal(15, 5, n_samples).clip(0),
+        'second_support_dist': np.random.normal(25, 8, n_samples).clip(0),
+        'teammates_in_radius': np.random.poisson(1.5, n_samples),
+        'lane_spread': np.random.normal(20, 8, n_samples).clip(0),
+        'max_lane_width': np.random.normal(40, 10, n_samples).clip(0),
+        'lane_balance': np.random.normal(5, 2, n_samples).clip(0),
+        'depth_range': np.random.normal(10, 4, n_samples).clip(0),
+        'depth_variance': np.random.normal(15, 5, n_samples).clip(0),
+        'is_flat_line': np.random.binomial(1, 0.2, n_samples),
+        'mean_team_speed': np.random.normal(25, 6, n_samples).clip(0),
+        'speed_variance': np.random.normal(5, 2, n_samples).clip(0),
+        'carrier_speed': np.random.normal(25, 5, n_samples).clip(0),
+        'carrier_acceleration': np.random.normal(0, 2, n_samples),
+        'nearest_defender_dist': np.random.normal(10, 5, n_samples).clip(0),
+        'defender_closing_speed': np.random.normal(5, 2, n_samples).clip(0),
+        'defenders_between': np.random.poisson(2, n_samples)
     })
     
-    # Simulate realistic logistical probabilities using dummy coefficients
-    
-    # 1. Shot within 10 seconds (P(Shot_10s = 1 | X))
-    # z = Beta_0 + Beta_1(SupportDist) + ...
-    z_shot = -1.5 + 0.05*data['SupportDist'] + 0.08*data['LaneSpread'] - 0.15*data['DepthRange'] + 0.12*data['MeanSpeed'] - 0.4*data['Pressure']
+    # Simulate realistic logistical probabilities
+    z_shot = -1.5 + 0.1*data['carrier_speed'] - 0.2*data['nearest_defender_dist'] + 0.05*data['lane_spread']
     prob_shot = 1 / (1 + np.exp(-z_shot))
     data['Shot_10s'] = np.random.binomial(1, prob_shot)
     
-    # 2. Probability of controlled zone entry (P(ControlledEntry = 1 | X))
-    # z = Alpha_0 + Alpha_1(SupportDist) + ...
-    z_entry = -0.5 + 0.1*data['SupportDist'] + 0.15*data['LaneSpread'] - 0.05*data['DepthRange'] + 0.2*data['MeanSpeed'] - 0.5*data['Pressure']
+    z_entry = -0.5 + 0.15*data['mean_team_speed'] - 0.3*data['defenders_between'] + 0.1*data['max_lane_width']
     prob_entry = 1 / (1 + np.exp(-z_entry))
     data['ControlledEntry'] = np.random.binomial(1, prob_entry)
     
-    X = data[['SupportDist', 'LaneSpread', 'DepthRange', 'MeanSpeed', 'Pressure']]
+    features = [
+        'nearest_support_dist', 'second_support_dist', 'teammates_in_radius',
+        'lane_spread', 'max_lane_width', 'lane_balance',
+        'depth_range', 'depth_variance', 'is_flat_line',
+        'mean_team_speed', 'speed_variance', 'carrier_speed', 'carrier_acceleration',
+        'nearest_defender_dist', 'defender_closing_speed', 'defenders_between'
+    ]
+    X = data[features]
     X = sm.add_constant(X)
     y_shot = data['Shot_10s']
     y_entry = data['ControlledEntry']
