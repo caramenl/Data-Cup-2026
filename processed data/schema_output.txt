@@ -1,0 +1,5 @@
+EVENTS:
+['Date', 'Home_Team', 'Away_Team', 'Period', 'Clock', 'Home_Team_Skaters', 'Away_Team_Skaters', 'Home_Team_Goals', 'Away_Team_Goals', 'Team', 'Player_Id', 'Event', 'X_Coordinate', 'Y_Coordinate', 'Detail_1', 'Detail_2', 'Detail_3', 'Detail_4', 'Player_Id_2', 'X_Coordinate_2', 'Y_Coordinate_2', 'Seconds', 'Strength', 'shift_flag', 'Next_Team', 'Next_Event']
+
+TRACKING:
+['Image Id', 'Period', 'Game Clock', 'Player or Puck', 'Team', 'Player Id', 'Player Jersey Number', 'Rink Location X (Feet)', 'Rink Location Y (Feet)', 'Rink Location Z (Feet)', 'Player_Id_Cleaned', 'Team_Name', 'Seconds', 'shift_flag']

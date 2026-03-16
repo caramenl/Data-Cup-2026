@@ -1,0 +1,4 @@
+Detail_1 unique:
+<StringArray>
+['Carried', 'Dumped', 'Played']
+Length: 3, dtype: str
