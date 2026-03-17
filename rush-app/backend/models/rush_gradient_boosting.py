@@ -7,15 +7,6 @@ import matplotlib.pyplot as plt
 import joblib
 import os
 
-"""
-Rush xG Regression Pipeline
----------------------------
-Goal: Predict offensive value (xG_15s) based on team structure during the first 2s of transition.
-
-xG_15s Calculation: 
-Sum of proxy xG values for all shots/goals by the attacking team within 15s of puck recovery.
-Proxy xG is a heuristic model based on shot type, distance to net, and shot angle.
-"""
 
 def load_and_prepare_data(filepath):
     """Loads engineered rushes and verify xG_15s exists."""
